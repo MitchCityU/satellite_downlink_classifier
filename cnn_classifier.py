@@ -36,7 +36,7 @@ CLS_MAP_PATH = Path("/home/ubuntu/rf_analysis-main/rf_analysis-main/dwingeloo/cl
 METRICS_DIR = Path("artifacts_metrics")
 
 BATCH_SIZE = 32
-EPOCHS = 2  
+EPOCHS = 80
 LR_MAX = 2e-3
 WEIGHT_DECAY = 1e-4
 TARGET_LEN = 240_000
@@ -45,12 +45,8 @@ MAX_FILES_PER_LABEL = 1000
 DIRECTORY_LABEL_OVERRIDES = {
     "APRIZESAT_DIR": "APRIZESAT", 
     "NOAA_DIR": "NOAA", 
-    "CONTECSAT-1_DIR": "CONTECSAT-1",
     "BOTSAT_DIR": "BOTSAT", 
-    "BLUEBON_DIR": "BLUEBON", 
-    "OTTER_PUP2_DIR": "OTTER",
-    "BRO_13_DIR": "BRO-13", 
-    "HUBBLE_7_DIR": "HUBBLE-7", 
+    "BLUEBON_DIR": "BLUEBON",  
     "STARLINK_DIR": "STARLINK_BEACON",
 }
 
@@ -359,12 +355,10 @@ def build_items_from_annot_mixed(annot_path, samples_dir, cls_map_path):
 
 
 def main():
-    """
-    Main driver method orchestration structure. Handles resource setup,
-    the active training iteration steps, evaluation cycles, and metrics logging outputs.
-    """
+    METRICS_DIR.mkdir(parents=True, exist_ok=True)
     json_path = METRICS_DIR / "metrics_summary.json"
     best_path = METRICS_DIR / "best_model.pt"
+    loss_report_path = METRICS_DIR / "loss_report.json"
     
     data_all, label_names = build_items_from_annot_mixed(ANNOT_PATH, SAMPLES_DIR, CLS_MAP_PATH)
     print("Labels counts:", len(label_names))
@@ -424,6 +418,7 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=is_cuda)
 
     best_acc = -1.0
+    loss_history = []
 
     print("Training Loop:")
     for epoch in range(1, EPOCHS + 1):
@@ -447,7 +442,22 @@ def main():
 
         val_loss, val_acc, _, _, _ = evaluate(model, test_loader, device)
         avg_train_loss = running_loss / len(train_loader)
-        print(f"Epoch {epoch} | Loss: {avg_train_loss} | Val Loss: {val_loss} | Val Acc: {val_acc}")
+        gap = val_loss - avg_train_loss
+        loss_row = {
+            "epoch": epoch,
+            "train_loss": float(avg_train_loss),
+            "validation_loss": float(val_loss),
+            "loss_gap": float(gap),
+            "validation_accuracy": float(val_acc),
+        }
+        loss_history.append(loss_row)
+        print(
+            f"Epoch {epoch} | "
+            f"Train Loss: {avg_train_loss:.6f} | "
+            f"Val Loss: {val_loss:.6f} | "
+            f"Gap: {gap:.6f} | "
+            f"Val Acc: {val_acc:.6f}"
+        )
 
         if val_acc > best_acc:
             best_acc = val_acc
@@ -519,6 +529,26 @@ def main():
     plt.savefig(METRICS_DIR / "precision_recall_curve.png", dpi=150)
     plt.close(fig)
 
+    if loss_history:
+        epochs = [row["epoch"] for row in loss_history]
+        train_losses = [row["train_loss"] for row in loss_history]
+        validation_losses = [row["validation_loss"] for row in loss_history]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(epochs, train_losses, marker="o", label="Training Loss")
+        ax.plot(epochs, validation_losses, marker="o", label="Validation Loss")
+        ax.set_title("Training vs Validation Loss")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Cross-Entropy Loss")
+        ax.legend(loc="best")
+        ax.grid(True)
+        plt.tight_layout()
+        plt.savefig(METRICS_DIR / "training_validation_loss.png", dpi=150)
+        plt.close(fig)
+
+    with open(loss_report_path, "w", encoding="utf-8") as f:
+        json.dump({"loss_history": loss_history}, f, indent=4)
+
     summary_data = {
         "overall": {
             "accuracy": float(val_acc), 
@@ -530,9 +560,14 @@ def main():
             "weighted_f1": float(weighted_f1), 
             "top2_accuracy": float(top2), 
             "val_loss": float(val_loss),
+            "final_train_loss": float(loss_history[-1]["train_loss"]) if loss_history else None,
+            "final_loss_gap": float(loss_history[-1]["loss_gap"]) if loss_history else None,
         },
         "per_class": per_class,
         "average_precision_by_class": average_precision_by_class,
+        "loss_history": loss_history,
+        "loss_report_file": str(loss_report_path),
+        "loss_curve_file": str(METRICS_DIR / "training_validation_loss.png"),
         "label_names": label_names,
     }
 
